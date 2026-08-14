@@ -43,6 +43,7 @@ from .r2d3 import R2D3Policy
 
 from .d4pg import D4PGPolicy
 from .cql import CQLPolicy, DiscreteCQLPolicy
+from .iql import IQLPolicy
 from .dt import DTPolicy
 from .pdqn import PDQNPolicy
 from .madqn import MADQNPolicy
@@ -52,6 +53,7 @@ from .edac import EDACPolicy
 from .prompt_pg import PromptPGPolicy
 from .plan_diffuser import PDPolicy
 from .happo import HAPPOPolicy
+from .prompt_awr import PromptAWRPolicy
 
 
 class EpsCommandModePolicy(CommandModePolicy):
@@ -321,6 +323,11 @@ class CQLCommandModePolicy(CQLPolicy, DummyCommandModePolicy):
     pass
 
 
+@POLICY_REGISTRY.register('iql_command')
+class IQLCommandModePolicy(IQLPolicy, DummyCommandModePolicy):
+    pass
+
+
 @POLICY_REGISTRY.register('discrete_cql_command')
 class DiscreteCQLCommandModePolicy(DiscreteCQLPolicy, EpsCommandModePolicy):
     pass
@@ -454,4 +461,9 @@ class BCCommandModePolicy(BehaviourCloningPolicy, DummyCommandModePolicy):
 
 @POLICY_REGISTRY.register('prompt_pg_command')
 class PromptPGCommandModePolicy(PromptPGPolicy, DummyCommandModePolicy):
+    pass
+
+
+@POLICY_REGISTRY.register('prompt_awr_command')
+class PromptAWRCommandModePolicy(PromptAWRPolicy, DummyCommandModePolicy):
     pass

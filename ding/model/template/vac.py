@@ -54,12 +54,12 @@ class VAC(nn.Module):
                 ``ReparameterizationHead``, and hybrid heads.
             - share_encoder (:obj:`bool`): Whether to share observation encoders between actor and decoder.
             - encoder_hidden_size_list (:obj:`SequenceType`): Collection of ``hidden_size`` to pass to ``Encoder``, \
-                the last element must match ``head_hidden_size``.
+                the last element is used as the input size of ``actor_head`` and ``critic_head``.
             - actor_head_hidden_size (:obj:`Optional[int]`): The ``hidden_size`` of ``actor_head`` network, defaults \
-                to 64, it must match the last element of ``encoder_hidden_size_list``.
+                to 64, it is the hidden size of the last layer of the ``actor_head`` network.
             - actor_head_layer_num (:obj:`int`): The num of layers used in the ``actor_head`` network to compute action.
             - critic_head_hidden_size (:obj:`Optional[int]`): The ``hidden_size`` of ``critic_head`` network, defaults \
-                to 64, it must match the last element of ``encoder_hidden_size_list``.
+                to 64, it is the hidden size of the last layer of the ``critic_head`` network.
             - critic_head_layer_num (:obj:`int`): The num of layers used in the ``critic_head`` network.
             - activation (:obj:`Optional[nn.Module]`): The type of activation function in networks \
                 if ``None`` then default set it to ``nn.ReLU()``.
@@ -108,15 +108,13 @@ class VAC(nn.Module):
                     )
 
         if self.share_encoder:
-            assert actor_head_hidden_size == critic_head_hidden_size, \
-                "actor and critic network head should have same size."
             if encoder:
                 if isinstance(encoder, torch.nn.Module):
                     self.encoder = encoder
                 else:
                     raise ValueError("illegal encoder instance.")
             else:
-                self.encoder = new_encoder(actor_head_hidden_size, activation)
+                self.encoder = new_encoder(encoder_hidden_size_list[-1], activation)
         else:
             if encoder:
                 if isinstance(encoder, torch.nn.Module):
@@ -125,25 +123,31 @@ class VAC(nn.Module):
                 else:
                     raise ValueError("illegal encoder instance.")
             else:
-                self.actor_encoder = new_encoder(actor_head_hidden_size, activation)
-                self.critic_encoder = new_encoder(critic_head_hidden_size, activation)
+                self.actor_encoder = new_encoder(encoder_hidden_size_list[-1], activation)
+                self.critic_encoder = new_encoder(encoder_hidden_size_list[-1], activation)
 
         # Head Type
         self.critic_head = RegressionHead(
-            critic_head_hidden_size, 1, critic_head_layer_num, activation=activation, norm_type=norm_type
+            encoder_hidden_size_list[-1],
+            1,
+            critic_head_layer_num,
+            activation=activation,
+            norm_type=norm_type,
+            hidden_size=critic_head_hidden_size
         )
         self.action_space = action_space
         assert self.action_space in ['discrete', 'continuous', 'hybrid'], self.action_space
         if self.action_space == 'continuous':
             self.multi_head = False
             self.actor_head = ReparameterizationHead(
-                actor_head_hidden_size,
+                encoder_hidden_size_list[-1],
                 action_shape,
                 actor_head_layer_num,
                 sigma_type=sigma_type,
                 activation=activation,
                 norm_type=norm_type,
-                bound_type=bound_type
+                bound_type=bound_type,
+                hidden_size=actor_head_hidden_size,
             )
         elif self.action_space == 'discrete':
             actor_head_cls = DiscreteHead
@@ -172,7 +176,7 @@ class VAC(nn.Module):
             action_shape.action_args_shape = squeeze(action_shape.action_args_shape)
             action_shape.action_type_shape = squeeze(action_shape.action_type_shape)
             actor_action_args = ReparameterizationHead(
-                actor_head_hidden_size,
+                encoder_hidden_size_list[-1],
                 action_shape.action_args_shape,
                 actor_head_layer_num,
                 sigma_type=sigma_type,
@@ -180,6 +184,7 @@ class VAC(nn.Module):
                 activation=activation,
                 norm_type=norm_type,
                 bound_type=bound_type,
+                hidden_size=actor_head_hidden_size,
             )
             actor_action_type = DiscreteHead(
                 actor_head_hidden_size,
@@ -236,20 +241,24 @@ class VAC(nn.Module):
         assert mode in self.mode, "not support forward mode: {}/{}".format(mode, self.mode)
         return getattr(self, mode)(x)
 
-    def compute_actor(self, x: torch.Tensor) -> Dict:
+    def compute_actor(self, x: Union[torch.Tensor, Dict]) -> Dict:
         """
         Overview:
             VAC forward computation graph for actor part, input observation tensor to predict action logit.
         Arguments:
-            - x (:obj:`torch.Tensor`): The input observation tensor data.
+            - x (:obj:`Union[torch.Tensor, Dict]`): The input observation tensor data. If a dictionary is provided, \
+                it should contain keys 'observation' and optionally 'action_mask'.
         Returns:
-            - outputs (:obj:`Dict`): The output dict of VAC's forward computation graph for actor, including ``logit``.
+            - outputs (:obj:`Dict`): The output dict of VAC's forward computation graph for actor, including ``logit`` \
+                and optionally ``action_mask`` if the input is a dictionary.
         ReturnsKeys:
             - logit (:obj:`torch.Tensor`): The predicted action logit tensor, for discrete action space, it will be \
                 the same dimension real-value ranged tensor of possible action choices, and for continuous action \
                 space, it will be the mu and sigma of the Gaussian distribution, and the number of mu and sigma is the \
                 same as the number of continuous actions. Hybrid action space is a kind of combination of discrete \
                 and continuous action space, so the logit will be a dict with ``action_type`` and ``action_args``.
+            - action_mask (:obj:`Optional[torch.Tensor]`): The action mask tensor, included if the input is a \
+                dictionary containing 'action_mask'.
         Shapes:
             - logit (:obj:`torch.Tensor`): :math:`(B, N)`, where B is batch size and N is ``action_shape``
 
@@ -259,13 +268,18 @@ class VAC(nn.Module):
             >>> actor_outputs = model(inputs,'compute_actor')
             >>> assert actor_outputs['logit'].shape == torch.Size([4, 64])
         """
-        if self.share_encoder:
-            x = self.encoder(x)
+        if isinstance(x, dict):
+            action_mask = x['action_mask']
+            x = self.encoder(x['observation']) if self.share_encoder else self.actor_encoder(x['observation'])
         else:
-            x = self.actor_encoder(x)
+            action_mask = None
+            x = self.encoder(x) if self.share_encoder else self.actor_encoder(x)
 
         if self.action_space == 'discrete':
-            return self.actor_head(x)
+            result = {'logit': self.actor_head(x)['logit']}
+            if action_mask is not None:
+                result['action_mask'] = action_mask
+            return result
         elif self.action_space == 'continuous':
             x = self.actor_head(x)  # mu, sigma
             return {'logit': x}
@@ -274,12 +288,13 @@ class VAC(nn.Module):
             action_args = self.actor_head[1](x)
             return {'logit': {'action_type': action_type['logit'], 'action_args': action_args}}
 
-    def compute_critic(self, x: torch.Tensor) -> Dict:
+    def compute_critic(self, x: Union[torch.Tensor, Dict]) -> Dict:
         """
         Overview:
             VAC forward computation graph for critic part, input observation tensor to predict state value.
         Arguments:
-            - x (:obj:`torch.Tensor`): The input observation tensor data.
+            - x (:obj:`Union[torch.Tensor, Dict]`): The input observation tensor data. If a dictionary is provided, \
+                it should contain the key 'observation'.
         Returns:
             - outputs (:obj:`Dict`): The output dict of VAC's forward computation graph for critic, including ``value``.
         ReturnsKeys:
@@ -293,23 +308,24 @@ class VAC(nn.Module):
             >>> critic_outputs = model(inputs,'compute_critic')
             >>> assert critic_outputs['value'].shape == torch.Size([4])
         """
-        if self.share_encoder:
-            x = self.encoder(x)
+        if isinstance(x, dict):
+            x = self.encoder(x['observation']) if self.share_encoder else self.critic_encoder(x['observation'])
         else:
-            x = self.critic_encoder(x)
+            x = self.encoder(x) if self.share_encoder else self.critic_encoder(x)
         x = self.critic_head(x)
         return {'value': x['pred']}
 
-    def compute_actor_critic(self, x: torch.Tensor) -> Dict:
+    def compute_actor_critic(self, x: Union[torch.Tensor, Dict]) -> Dict:
         """
         Overview:
             VAC forward computation graph for both actor and critic part, input observation tensor to predict action \
             logit and state value.
         Arguments:
-            - x (:obj:`torch.Tensor`): The input observation tensor data.
+            - x (:obj:`Union[torch.Tensor, Dict]`): The input observation tensor data. If a dictionary is provided, \
+                it should contain keys 'observation' and optionally 'action_mask'.
         Returns:
             - outputs (:obj:`Dict`): The output dict of VAC's forward computation graph for both actor and critic, \
-                including ``logit`` and ``value``.
+                including ``logit``, ``value``, and optionally ``action_mask`` if the input is a dictionary.
         ReturnsKeys:
             - logit (:obj:`torch.Tensor`): The predicted action logit tensor, for discrete action space, it will be \
                 the same dimension real-value ranged tensor of possible action choices, and for continuous action \
@@ -317,6 +333,8 @@ class VAC(nn.Module):
                 same as the number of continuous actions. Hybrid action space is a kind of combination of discrete \
                 and continuous action space, so the logit will be a dict with ``action_type`` and ``action_args``.
             - value (:obj:`torch.Tensor`): The predicted state value tensor.
+            - action_mask (:obj:`torch.Tensor`, optional): The action mask tensor, included if the input is a \
+                dictionary containing 'action_mask'.
         Shapes:
             - logit (:obj:`torch.Tensor`): :math:`(B, N)`, where B is batch size and N is ``action_shape``
             - value (:obj:`torch.Tensor`): :math:`(B, )`, where B is batch size, (B, 1) is squeezed to (B, ).
@@ -333,17 +351,29 @@ class VAC(nn.Module):
             ``compute_actor_critic`` interface aims to save computation when shares encoder and return the combination \
             dict output.
         """
-        if self.share_encoder:
-            actor_embedding = critic_embedding = self.encoder(x)
+        if isinstance(x, dict):
+            action_mask = x['action_mask']
+            if self.share_encoder:
+                actor_embedding = critic_embedding = self.encoder(x['observation'])
+            else:
+                actor_embedding = self.actor_encoder(x['observation'])
+                critic_embedding = self.critic_encoder(x['observation'])
         else:
-            actor_embedding = self.actor_encoder(x)
-            critic_embedding = self.critic_encoder(x)
+            action_mask = None
+            if self.share_encoder:
+                actor_embedding = critic_embedding = self.encoder(x)
+            else:
+                actor_embedding = self.actor_encoder(x)
+                critic_embedding = self.critic_encoder(x)
 
         value = self.critic_head(critic_embedding)['pred']
 
         if self.action_space == 'discrete':
             logit = self.actor_head(actor_embedding)['logit']
-            return {'logit': logit, 'value': value}
+            result = {'logit': logit, 'value': value}
+            if action_mask is not None:
+                result['action_mask'] = action_mask
+            return result
         elif self.action_space == 'continuous':
             x = self.actor_head(actor_embedding)
             return {'logit': x, 'value': value}

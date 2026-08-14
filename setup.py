@@ -55,29 +55,32 @@ setup(
         'gym==0.25.1',  # pypy incompatible; some environments only support gym==0.22.0
         'gymnasium',
         'torch>=1.1.0',
-        'numpy>=1.18.0',
+        'numpy>=1.18.0,<2',
         'DI-treetensor>=0.4.0',
         'DI-toolkit>=0.1.0',
         'trueskill',
         'tensorboardX>=2.2',
-        'wandb',
+        'wandb<=0.19.0',
         'matplotlib',
-        'easydict==1.9',
+        'easydict>=1.9',
         'pyyaml',
         'enum_tools',
         'cloudpickle',
         'hickle',
         'tabulate',
         'click>=7.0.0',
-        'requests>=2.25.1',  # interaction
-        'flask~=1.1.2',  # interaction
-        'responses~=0.12.1',  # interaction
-        'URLObject>=2.4.0',  # interaction
-        'MarkupSafe==2.0.1',  # interaction, compatibility
+        'flask<=2.0.3',  # interaction
+        'werkzeug<=2.0.3',  # interaction
+        'requests',  # interaction
+        'responses',  # interaction
+        'URLObject',  # interaction
         'pynng',  # parallel
-        'sniffio', # parallel
+        'sniffio',  # parallel
         'redis',  # parallel
         'mpire>=2.3.5',  # parallel
+        'einops',
+        'transformers',
+        'datasets',
     ],
     extras_require={
         'test': [
@@ -95,8 +98,8 @@ setup(
             'h5py',
             'scipy',
             'scikit-learn',
-            'gym[box2d]==0.25.1',
             'pettingzoo<=1.22.3',
+            'pygame',
             'opencv-python',  # pypy incompatible
             'pyecharts',
         ],
@@ -188,6 +191,7 @@ setup(
         'Programming Language :: Python :: 3.7',
         'Programming Language :: Python :: 3.8',
         'Programming Language :: Python :: 3.9',
+        'Programming Language :: Python :: 3.10',
         'Topic :: Scientific/Engineering :: Artificial Intelligence',
     ],
 )

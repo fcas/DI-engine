@@ -1,4 +1,5 @@
 import gym
+import gymnasium
 import numpy as np
 import pytest
 from easydict import EasyDict
@@ -68,6 +69,26 @@ class TestDingEnvWrapper:
         # assert isinstance(action, np.ndarray)
         print('random_action: {}, action_space: {}'.format(action.shape, ding_env.action_space))
 
+    @pytest.mark.unittest
+    @pytest.mark.parametrize('env_id', ['CartPole-v0', 'Pendulum-v1'])
+    def test_cartpole_pendulum_gymnasium(self, env_id):
+        env = gymnasium.make(env_id)
+        ding_env = DingEnvWrapper(env=env)
+        cfg = EasyDict(dict(
+            collector_env_num=16,
+            evaluator_env_num=3,
+            is_train=True,
+        ))
+        l1 = ding_env.create_collector_env_cfg(cfg)
+        assert isinstance(l1, list)
+        l1 = ding_env.create_evaluator_env_cfg(cfg)
+        assert isinstance(l1, list)
+        obs = ding_env.reset()
+        assert isinstance(obs, np.ndarray)
+        action = ding_env.random_action()
+        # assert isinstance(action, np.ndarray)
+        print('random_action: {}, action_space: {}'.format(action.shape, ding_env.action_space))
+
     @pytest.mark.envtest
     def test_mujoco(self):
         env_cfg = EasyDict(
@@ -120,7 +141,7 @@ class TestDingEnvWrapper:
         # assert isinstance(action, np.ndarray)
         assert action.shape == (1, )
 
-    @pytest.mark.unittest
+    @pytest.mark.envtest
     @pytest.mark.parametrize('lun_bip_env_id', ['LunarLander-v2', 'LunarLanderContinuous-v2', 'BipedalWalker-v3'])
     def test_lunarlander_bipedalwalker(self, lun_bip_env_id):
         env_cfg = EasyDict(

@@ -1,3 +1,48 @@
+2024.12.23 (v0.5.3)
+- env: add pistonball MARL env and its unittest/example (#833)
+- env: update trading env (#831)
+- env: update ppo config for better discrete action space performance (#809)
+- env: remove unused config fields in MuJoCo PPO
+- algo: add AWR algorithm (#828)
+- algo: add encoder in MAVAC (#823)
+- algo: add HPT model architecture (#841)
+- algo: fix multiple model wrappers reset bug (#846)
+- algo: add hybrid action space support to ActionNoiseWrapper (#829)
+- algo: fix mappo adv compute bug (#812)
+- feature: add resume_training option to allow the envstep and train_iter resume seamlessly (#835)
+- feature: polish old/new pipeline DistributedDataParallel (DDP) implementation (#842)
+- feature: adapt DingEnvWrapper to gymnasium (#817)
+- fix: priority buffer delete bug (#844)
+- fix: middleware collector env reset bug (#845)
+- fix: fix many unittest bugs
+- style: downgrade pyecharts log level to warning and polish installation doc (#838)
+- style: polish necessary requirements
+- style: polish api doc details
+- style: polish DI-engine citation authors
+- style: upgrade CI macos version from 12 to 13
+
+2024.06.27(v0.5.2)
+- env: add taxi env (#799) (#807) 
+- env: add ising model env (#782)
+- env: add new Flozen Lake env (#781)
+- env: optimize ppo continuous config in MuJoCo (#801)
+- env: fix masac smac config multi_agent=True bug (#791)
+- env: update/speed up pendulum ppo
+- algo: fix gtrxl compatibility bug (#796)
+- algo: fix complex obs demo for ppo pipeline (#786)
+- algo: add naive PWIL demo
+- algo: fix marl nstep td compatibility bug
+- feature: add GPU utils (#788)
+- feature: add deprecated function decorator (#778)
+- style: relax flask requirement (#811)
+- style: add new badge (hellogithub) in readme (#805)
+- style: update discord link and badge in readme (#795)
+- style: fix typo in config.py (#776)
+- style: polish rl_utils api docs
+- style: add constraint about numpy<2
+- style: polish macos platform test version to 12
+- style: polish ci python version
+
 2024.02.04(v0.5.1)
 - env: add MADDPG pettingzoo example (#774)
 - env: polish NGU Atari configs (#767)

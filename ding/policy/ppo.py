@@ -52,6 +52,11 @@ class PPOPolicy(Policy):
             batch_size=64,
             # (float) The step size of gradient descent.
             learning_rate=3e-4,
+            # (dict or None) The learning rate decay.
+            # If not None, should contain key 'epoch_num' and 'min_lr_lambda'.
+            # where 'epoch_num' is the total epoch num to decay the learning rate to min value,
+            # 'min_lr_lambda' is the final decayed learning rate.
+            lr_scheduler=None,
             # (float) The loss weight of value network, policy network weight is set to 1.
             value_weight=0.5,
             # (float) The loss weight of entropy regularization, policy network weight is set to 1.
@@ -71,6 +76,15 @@ class PPOPolicy(Policy):
             grad_clip_value=0.5,
             # (bool) Whether ignore done (usually for max step termination env).
             ignore_done=False,
+            # (str) The type of KL divergence loss between current policy and pretrained policy, ['k1', 'k2', 'k3'].
+            # Reference: http://joschu.net/blog/kl-approx.html
+            kl_type='k1',
+            # (float) The weight of KL divergence loss.
+            kl_beta=0.0,
+            # (Optional[str]) The path of pretrained model checkpoint.
+            # If provided, KL regularizer will be calculated between current policy and pretrained policy.
+            # Default to None, which means KL is not calculated.
+            pretrained_model_path=None,
         ),
         # collect_mode config
         collect=dict(
@@ -169,7 +183,26 @@ class PPOPolicy(Policy):
             clip_value=self._cfg.learn.grad_clip_value
         )
 
+        # Define linear lr scheduler
+        if self._cfg.learn.lr_scheduler is not None:
+            epoch_num = self._cfg.learn.lr_scheduler['epoch_num']
+            min_lr_lambda = self._cfg.learn.lr_scheduler['min_lr_lambda']
+
+            self._lr_scheduler = torch.optim.lr_scheduler.LambdaLR(
+                self._optimizer,
+                lr_lambda=lambda epoch: max(1.0 - epoch * (1.0 - min_lr_lambda) / epoch_num, min_lr_lambda)
+            )
+
         self._learn_model = model_wrap(self._model, wrapper_name='base')
+
+        # load pretrained model
+        if self._cfg.learn.pretrained_model_path is not None:
+            self._pretrained_model = copy.deepcopy(self._model)
+            state_dict = torch.load(self._cfg.learn.pretrained_model_path, map_location='cpu')
+            self._pretrained_model.load_state_dict(state_dict)
+            self._pretrained_model.eval()
+        else:
+            self._pretrained_model = None
 
         # Algorithm config
         self._value_weight = self._cfg.learn.value_weight
@@ -177,6 +210,8 @@ class PPOPolicy(Policy):
         self._clip_ratio = self._cfg.learn.clip_ratio
         self._adv_norm = self._cfg.learn.adv_norm
         self._value_norm = self._cfg.learn.value_norm
+        self._kl_type = self._cfg.learn.kl_type
+        self._kl_beta = self._cfg.learn.kl_beta
         if self._value_norm:
             self._running_mean_std = RunningMeanStd(epsilon=1e-4, device=self._device)
         self._gamma = self._cfg.collect.discount_factor
@@ -270,52 +305,69 @@ class PPOPolicy(Policy):
                     # Normalize advantage in a train_batch
                     adv = (adv - adv.mean()) / (adv.std() + 1e-8)
 
+                if self._pretrained_model is not None:
+                    with torch.no_grad():
+                        logit_pretrained = self._pretrained_model.forward(batch['obs'], mode='compute_actor')['logit']
+                else:
+                    logit_pretrained = None
+
                 # Calculate ppo error
                 if self._action_space == 'continuous':
                     ppo_batch = ppo_data(
                         output['logit'], batch['logit'], batch['action'], output['value'], batch['value'], adv,
-                        batch['return'], batch['weight']
+                        batch['return'], batch['weight'], logit_pretrained
                     )
-                    ppo_loss, ppo_info = ppo_error_continuous(ppo_batch, self._clip_ratio)
+                    ppo_loss, ppo_info = ppo_error_continuous(ppo_batch, self._clip_ratio, kl_type=self._kl_type)
                 elif self._action_space == 'discrete':
                     ppo_batch = ppo_data(
                         output['logit'], batch['logit'], batch['action'], output['value'], batch['value'], adv,
-                        batch['return'], batch['weight']
+                        batch['return'], batch['weight'], logit_pretrained
                     )
-                    ppo_loss, ppo_info = ppo_error(ppo_batch, self._clip_ratio)
+                    ppo_loss, ppo_info = ppo_error(ppo_batch, self._clip_ratio, kl_type=self._kl_type)
                 elif self._action_space == 'hybrid':
                     # discrete part (discrete policy loss and entropy loss)
                     ppo_discrete_batch = ppo_policy_data(
                         output['logit']['action_type'], batch['logit']['action_type'], batch['action']['action_type'],
-                        adv, batch['weight']
+                        adv, batch['weight'], logit_pretrained
                     )
-                    ppo_discrete_loss, ppo_discrete_info = ppo_policy_error(ppo_discrete_batch, self._clip_ratio)
+                    ppo_discrete_loss, ppo_discrete_info = ppo_policy_error(
+                        ppo_discrete_batch, self._clip_ratio, kl_type=self._kl_type
+                    )
                     # continuous part (continuous policy loss and entropy loss, value loss)
                     ppo_continuous_batch = ppo_data(
                         output['logit']['action_args'], batch['logit']['action_args'], batch['action']['action_args'],
-                        output['value'], batch['value'], adv, batch['return'], batch['weight']
+                        output['value'], batch['value'], adv, batch['return'], batch['weight'], None
                     )
                     ppo_continuous_loss, ppo_continuous_info = ppo_error_continuous(
-                        ppo_continuous_batch, self._clip_ratio
+                        ppo_continuous_batch, self._clip_ratio, kl_type=self._kl_type
                     )
                     # sum discrete and continuous loss
                     ppo_loss = type(ppo_continuous_loss)(
                         ppo_continuous_loss.policy_loss + ppo_discrete_loss.policy_loss, ppo_continuous_loss.value_loss,
-                        ppo_continuous_loss.entropy_loss + ppo_discrete_loss.entropy_loss
+                        ppo_continuous_loss.entropy_loss + ppo_discrete_loss.entropy_loss, ppo_continuous_loss.kl_div
                     )
                     ppo_info = type(ppo_continuous_info)(
                         max(ppo_continuous_info.approx_kl, ppo_discrete_info.approx_kl),
                         max(ppo_continuous_info.clipfrac, ppo_discrete_info.clipfrac)
                     )
                 wv, we = self._value_weight, self._entropy_weight
-                total_loss = ppo_loss.policy_loss + wv * ppo_loss.value_loss - we * ppo_loss.entropy_loss
+                kl_div = ppo_loss.kl_div
+                total_loss = (
+                    ppo_loss.policy_loss + wv * ppo_loss.value_loss - we * ppo_loss.entropy_loss +
+                    self._kl_beta * kl_div
+                )
 
                 self._optimizer.zero_grad()
                 total_loss.backward()
                 self._optimizer.step()
 
+                if self._cfg.learn.lr_scheduler is not None:
+                    cur_lr = sum(self._lr_scheduler.get_last_lr()) / len(self._lr_scheduler.get_last_lr())
+                else:
+                    cur_lr = self._optimizer.defaults['lr']
+
                 return_info = {
-                    'cur_lr': self._optimizer.defaults['lr'],
+                    'cur_lr': cur_lr,
                     'total_loss': total_loss.item(),
                     'policy_loss': ppo_loss.policy_loss.item(),
                     'value_loss': ppo_loss.value_loss.item(),
@@ -326,6 +378,7 @@ class PPOPolicy(Policy):
                     'value_max': output['value'].max().item(),
                     'approx_kl': ppo_info.approx_kl,
                     'clipfrac': ppo_info.clipfrac,
+                    'kl_div': kl_div.item(),
                 }
                 if self._action_space == 'continuous':
                     return_info.update(
@@ -336,6 +389,10 @@ class PPOPolicy(Policy):
                         }
                     )
                 return_infos.append(return_info)
+
+        if self._cfg.learn.lr_scheduler is not None:
+            self._lr_scheduler.step()
+
         return return_infos
 
     def _init_collect(self) -> None:
@@ -570,6 +627,8 @@ class PPOPolicy(Policy):
             'value_max',
             'value_mean',
         ]
+        if self._pretrained_model is not None:
+            variables += ['kl_div']
         if self._action_space == 'continuous':
             variables += ['mu_mean', 'sigma_mean', 'sigma_grad', 'act']
         return variables
@@ -735,7 +794,7 @@ class PPOPGPolicy(Policy):
                 output = self._learn_model.forward(batch['obs'])
 
                 ppo_batch = ppo_policy_data(
-                    output['logit'], batch['logit'], batch['action'], batch['return'], batch['weight']
+                    output['logit'], batch['logit'], batch['action'], batch['return'], batch['weight'], None
                 )
                 if self._action_space == 'continuous':
                     ppo_loss, ppo_info = ppo_policy_error_continuous(ppo_batch, self._clip_ratio)
@@ -1176,26 +1235,26 @@ class PPOOffPolicy(Policy):
             if self._action_space == 'continuous':
                 ppodata = ppo_data(
                     output['logit'], data['logit'], data['action'], output['value'], data['value'], adv, data['return'],
-                    data['weight']
+                    data['weight'], None
                 )
                 ppo_loss, ppo_info = ppo_error_continuous(ppodata, self._clip_ratio)
             elif self._action_space == 'discrete':
                 ppodata = ppo_data(
                     output['logit'], data['logit'], data['action'], output['value'], data['value'], adv, data['return'],
-                    data['weight']
+                    data['weight'], None
                 )
                 ppo_loss, ppo_info = ppo_error(ppodata, self._clip_ratio)
             elif self._action_space == 'hybrid':
                 # discrete part (discrete policy loss and entropy loss)
                 ppo_discrete_batch = ppo_policy_data(
                     output['logit']['action_type'], data['logit']['action_type'], data['action']['action_type'], adv,
-                    data['weight']
+                    data['weight'], None
                 )
                 ppo_discrete_loss, ppo_discrete_info = ppo_policy_error(ppo_discrete_batch, self._clip_ratio)
                 # continuous part (continuous policy loss and entropy loss, value loss)
                 ppo_continuous_batch = ppo_data(
                     output['logit']['action_args'], data['logit']['action_args'], data['action']['action_args'],
-                    output['value'], data['value'], adv, data['return'], data['weight']
+                    output['value'], data['value'], adv, data['return'], data['weight'], None
                 )
                 ppo_continuous_loss, ppo_continuous_info = ppo_error_continuous(ppo_continuous_batch, self._clip_ratio)
                 # sum discrete and continuous loss
@@ -1220,22 +1279,22 @@ class PPOOffPolicy(Policy):
 
             # Calculate ppo loss
             if self._action_space == 'continuous':
-                ppodata = ppo_policy_data(output['logit'], data['logit'], data['action'], adv, data['weight'])
+                ppodata = ppo_policy_data(output['logit'], data['logit'], data['action'], adv, data['weight'], None)
                 ppo_policy_loss, ppo_info = ppo_policy_error_continuous(ppodata, self._clip_ratio)
             elif self._action_space == 'discrete':
-                ppodata = ppo_policy_data(output['logit'], data['logit'], data['action'], adv, data['weight'])
+                ppodata = ppo_policy_data(output['logit'], data['logit'], data['action'], adv, data['weight'], None)
                 ppo_policy_loss, ppo_info = ppo_policy_error(ppodata, self._clip_ratio)
             elif self._action_space == 'hybrid':
                 # discrete part (discrete policy loss and entropy loss)
                 ppo_discrete_data = ppo_policy_data(
                     output['logit']['action_type'], data['logit']['action_type'], data['action']['action_type'], adv,
-                    data['weight']
+                    data['weight'], None
                 )
                 ppo_discrete_loss, ppo_discrete_info = ppo_policy_error(ppo_discrete_data, self._clip_ratio)
                 # continuous part (continuous policy loss and entropy loss, value loss)
                 ppo_continuous_data = ppo_policy_data(
                     output['logit']['action_args'], data['logit']['action_args'], data['action']['action_args'], adv,
-                    data['weight']
+                    data['weight'], None
                 )
                 ppo_continuous_loss, ppo_continuous_info = ppo_policy_error_continuous(
                     ppo_continuous_data, self._clip_ratio
@@ -1745,13 +1804,13 @@ class PPOSTDIMPolicy(PPOPolicy):
                 if self._action_space == 'continuous':
                     ppo_batch = ppo_data(
                         output['logit'], batch['logit'], batch['action'], output['value'], batch['value'], adv,
-                        batch['return'], batch['weight']
+                        batch['return'], batch['weight'], None
                     )
                     ppo_loss, ppo_info = ppo_error_continuous(ppo_batch, self._clip_ratio)
                 elif self._action_space == 'discrete':
                     ppo_batch = ppo_data(
                         output['logit'], batch['logit'], batch['action'], output['value'], batch['value'], adv,
-                        batch['return'], batch['weight']
+                        batch['return'], batch['weight'], None
                     )
                     ppo_loss, ppo_info = ppo_error(ppo_batch, self._clip_ratio)
 
